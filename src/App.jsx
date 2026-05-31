@@ -6,7 +6,6 @@ import {
 import { 
   getAuth, 
   signInAnonymously, 
-  signInWithCustomToken, 
   onAuthStateChanged 
 } from 'firebase/auth';
 import { 
@@ -72,8 +71,10 @@ export default function App() {
   const [generatedTables, setGeneratedTables] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const [selectedConfigIndex, setSelectedConfigIndex] = useState(0);
+  const [dbError, setDbError] = useState('');
   const hasInjectedDefault = useRef(false);
 
+  const PLAYERS_COLLECTION_PATH = 'players';
   const presentCount = players.filter(p => p.isPresent).length;
 
   // Auto-reset config index if player count changes
@@ -87,12 +88,7 @@ export default function App() {
 
     const initAuth = async () => {
       try {
-        const authToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN;
-        if (authToken) {
-          await signInWithCustomToken(auth, authToken);
-        } else {
-          await signInAnonymously(auth);
-        }
+        await signInAnonymously(auth);
       } catch (err) {
         console.error('Authentication Error:', err);
       }
@@ -107,7 +103,7 @@ export default function App() {
     if (!user || !db) return;
 
     // GLOBAL PERSISTENCE
-    const playersRef = collection(db, 'artifacts', appId, 'public', 'data', 'players');
+    const playersRef = collection(db, PLAYERS_COLLECTION_PATH);
     
     // Check and inject default roster if empty
     const checkDefault = async () => {
@@ -121,7 +117,10 @@ export default function App() {
             setDoc(newRef, { name, isPresent: true });
           });
         }
-      } catch (e) { console.error(e); }
+      } catch (e) {
+        console.error('Firestore read failed:', e);
+        setDbError('Firestore access failed. Please verify Firestore rules and collection permissions.');
+      }
     };
     checkDefault();
 
@@ -149,7 +148,7 @@ export default function App() {
     setNewPlayerName('');
 
     const newId = crypto.randomUUID();
-    const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', newId);
+    const playerRef = doc(db, PLAYERS_COLLECTION_PATH, newId);
     
     try {
       await setDoc(playerRef, {
@@ -158,26 +157,29 @@ export default function App() {
       });
     } catch (err) {
       console.error("Error adding player:", err);
+      setDbError('Unable to add player. Verify Firestore write permissions.');
     }
   };
 
   const removePlayer = async (id) => {
     if (!user) return;
     try {
-      const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', id);
+      const playerRef = doc(db, PLAYERS_COLLECTION_PATH, id);
       await deleteDoc(playerRef);
     } catch (err) {
       console.error("Error removing player:", err);
+      setDbError('Unable to remove player. Verify Firestore delete permissions.');
     }
   };
 
   const togglePresence = async (id, currentStatus) => {
     if (!user) return;
     try {
-      const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', id);
+      const playerRef = doc(db, PLAYERS_COLLECTION_PATH, id);
       await setDoc(playerRef, { isPresent: !currentStatus }, { merge: true });
     } catch (err) {
       console.error("Error toggling presence:", err);
+      setDbError('Unable to update presence. Verify Firestore update permissions.');
     }
   };
 
@@ -186,7 +188,7 @@ export default function App() {
     try {
       const promises = players.map(player => {
         if (player.isPresent !== status) {
-          const playerRef = doc(db, 'artifacts', appId, 'public', 'data', 'players', player.id);
+          const playerRef = doc(db, PLAYERS_COLLECTION_PATH, player.id);
           return setDoc(playerRef, { isPresent: status }, { merge: true });
         }
         return Promise.resolve();
@@ -334,10 +336,10 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-200 font-sans mx-auto max-w-md w-full relative overflow-hidden shadow-2xl shadow-black">
+    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-200 font-sans w-full relative overflow-hidden shadow-2xl shadow-black">
       
       {/* Header */}
-      <div className="bg-slate-900 border-b border-slate-800 p-4 pt-6 shrink-0 flex items-center justify-between z-10">
+      <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 shrink-0 flex items-center justify-between z-10">
         <div>
           <h1 className="text-xl font-bold bg-gradient-to-r from-orange-400 to-red-500 bg-clip-text text-transparent">
             Commander Tables
