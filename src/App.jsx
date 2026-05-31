@@ -565,7 +565,7 @@ export default function App() {
       </div>
 
       {/* Bottom Navigation */}
-      <div className="absolute bottom-0 left-0 w-full bg-slate-900 border-t border-slate-800 flex justify-between px-2 pb-safe pt-2 z-20">
+      <div className="fixed bottom-0 left-0 right-0 w-full bg-slate-900 border-t border-slate-800 flex justify-between px-2 pb-safe pt-2 z-30">
         <NavButton 
           icon={<Users />} 
           label="Roster" 
