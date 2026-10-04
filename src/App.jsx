@@ -20,7 +20,7 @@ import {
   where
 } from 'firebase/firestore';
 import ManualTables from './components/ManualTables.jsx';
-import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables, splitPool } from './lib/pairing.js';
+import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables } from './lib/pairing.js';
 
 // --- Firebase Initialization ---
 const firebaseConfig = {
@@ -81,13 +81,17 @@ export default function App() {
   const presentPlayers = useMemo(() => players.filter(p => p.isPresent), [players]);
   const presentCount = presentPlayers.length;
 
-  // Manual tables are locked; everyone else is the random pool.
-  const { manualTables, pool } = useMemo(
-    () => splitPool(presentPlayers, manualIds),
-    [presentPlayers, manualIds]
-  );
-  const poolCount = pool.length;
-  const hasManual = manualTables.length > 0;
+  // Tables the group already started by hand (present players only, one seat per player).
+  const manualTables = useMemo(() => {
+    const byId = new Map(presentPlayers.map(p => [p.id, p]));
+    const taken = new Set();
+    return manualIds.map(ids => ids
+      .filter(id => byId.has(id) && !taken.has(id))
+      .map(id => {
+        taken.add(id);
+        return byId.get(id);
+      }));
+  }, [presentPlayers, manualIds]);
 
   // Rolls of the current session, newest first.
   const sessionRolls = useMemo(
@@ -97,18 +101,18 @@ export default function App() {
     [rolls, sessionId]
   );
 
-  const currentConfigs = getLayouts(poolCount);
+  const currentConfigs = getLayouts(presentCount);
   const activeLayout = currentConfigs.find(c => c.join(',') === selectedLayoutKey) || currentConfigs[0];
 
-  // Why the roll button is disabled (empty string = ready).
-  const blockReason = (() => {
-    if (presentCount < MIN_TABLE_SIZE) return `Need at least ${MIN_TABLE_SIZE} players. Currently have ${presentCount}.`;
+  // Why Randomize is disabled (empty string = ready).
+  const blockReason = presentCount < MIN_TABLE_SIZE
+    ? `Need at least ${MIN_TABLE_SIZE} players. Currently have ${presentCount}.`
+    : '';
+
+  // Why saving the manual round is disabled (empty string = ready).
+  const manualBlockReason = (() => {
     const short = manualTables.findIndex(t => t.length < MIN_TABLE_SIZE);
-    if (short !== -1) return `Manual table ${short + 1} needs at least ${MIN_TABLE_SIZE} players.`;
-    if (poolCount > 0 && poolCount < MIN_TABLE_SIZE) {
-      return `${poolCount} player${poolCount > 1 ? 's' : ''} left over. Add them to a manual table or mark them absent.`;
-    }
-    return '';
+    return short === -1 ? '' : `Manual table ${short + 1} needs at least ${MIN_TABLE_SIZE} players.`;
   })();
 
   // --- Auth & Data Fetching ---
@@ -255,22 +259,9 @@ export default function App() {
   };
 
   // --- Generation ---
-  // Manual tables are kept as-is, the remaining pool is optimized against the
-  // whole session's pair history, and everything is saved as one shared roll.
-  const generateTables = () => {
-    if (blockReason || !sessionId || !user) return;
-
-    let randomTables = [];
-    if (poolCount > 0) {
-      if (!activeLayout) return;
-      const history = buildPairHistory(sessionRolls);
-      randomTables = optimizeTables(pool, activeLayout, history).tables;
-    }
-
-    const tables = [
-      ...manualTables.map(players => ({ manual: true, players })),
-      ...randomTables.map(players => ({ manual: false, players })),
-    ].map(t => ({
+  // Saves one roll (a list of { manual, players } tables) to the shared session history.
+  const saveRoll = (rawTables) => {
+    const tables = rawTables.map(t => ({
       manual: t.manual,
       players: t.players.map(({ id, name }) => ({ id, name })),
     }));
@@ -279,7 +270,7 @@ export default function App() {
       sessionId,
       createdAt: Date.now(),
       tables,
-      playerIds: presentPlayers.map(p => p.id).sort().join(','),
+      playerIds: tables.flatMap(t => t.players.map(p => p.id)).sort().join(','),
       layout: tables.map(t => (t.manual ? `m${t.players.length}` : t.players.length)).join(','),
     };
 
@@ -289,6 +280,22 @@ export default function App() {
       console.error('Error saving roll:', err);
       setDbError('Unable to save the roll. Verify Firestore write permissions for the rolls collection.');
     });
+  };
+
+  // Shuffles everyone present, avoiding pairings already seen this session
+  // (including manual rounds).
+  const generateTables = () => {
+    if (blockReason || !sessionId || !user || !activeLayout) return;
+    const history = buildPairHistory(sessionRolls);
+    const { tables } = optimizeTables(presentPlayers, activeLayout, history);
+    saveRoll(tables.map(players => ({ manual: false, players })));
+  };
+
+  // Records tables the group started by hand as a played round, so the next
+  // randomize treats those pairings as already played.
+  const saveManualRound = () => {
+    if (manualBlockReason || manualTables.length === 0 || !sessionId || !user) return;
+    saveRoll(manualTables.map(players => ({ manual: true, players })));
     setManualIds([]);
   };
 
@@ -443,18 +450,20 @@ export default function App() {
         {activeTab === 'tables' && (
           <div className="p-4 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
 
-            {/* Manual (locked) tables */}
+            {/* Manual round: tables the group already started */}
             <ManualTables
               presentPlayers={presentPlayers}
               manualTables={manualTables.map(t => t.map(p => p.id))}
               onChange={setManualIds}
+              onSave={saveManualRound}
+              saveBlockReason={manualBlockReason || (sessionId ? '' : 'Connecting…')}
             />
 
             {/* Configuration Options Picker */}
             {currentConfigs.length > 1 && (
               <div className="bg-slate-900/50 p-3 rounded-2xl border border-slate-800 flex flex-col gap-2">
                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-1">
-                  {hasManual ? `Layout for the remaining ${poolCount} players` : `Table Layout (${presentCount} Players)`}
+                  Table Layout ({presentCount} Players)
                 </span>
                 <div className="flex flex-wrap gap-2">
                   {currentConfigs.map((config) => {
@@ -482,8 +491,8 @@ export default function App() {
               disabled={!!blockReason || !sessionId}
               className="w-full bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 text-white font-bold py-4 px-6 rounded-2xl shadow-xl shadow-orange-900/20 transition-all active:scale-[0.98] flex items-center justify-center gap-3"
             >
-              {hasManual && poolCount === 0 ? <Lock size={24} /> : <Dices size={24} />}
-              <span className="text-lg">{hasManual && poolCount === 0 ? 'Save Manual Round' : 'Randomize Tables'}</span>
+              <Dices size={24} />
+              <span className="text-lg">Randomize Tables</span>
             </button>
 
             {blockReason && players.length > 0 && (
@@ -533,6 +542,7 @@ export default function App() {
                       <div className="flex items-center justify-between px-1 border-b border-slate-800 pb-2">
                         <h2 className={`text-sm font-bold uppercase tracking-wider ${isLatest ? 'text-orange-400' : 'text-slate-500'}`}>
                           {isLatest ? 'Current Roll' : `Previous Roll`}
+                          {historyItem.tables.every(t => t.manual) && ' · Manual'}
                         </h2>
                         <span className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-900/80 px-2 py-1 rounded-md border border-slate-800">
                           <Clock size={12} />

@@ -157,22 +157,3 @@ export function optimizeTables(players, layout, history, { restarts = 30, rng = 
   }
   return best;
 }
-
-/**
- * Splits present players into manual tables (locked) and the remaining pool.
- * `manualIds` is an array of arrays of player ids. Absent / unknown ids are dropped.
- */
-export function splitPool(presentPlayers, manualIds) {
-  const byId = new Map(presentPlayers.map((p) => [p.id, p]));
-  const taken = new Set();
-  const manualTables = manualIds.map((ids) =>
-    ids
-      .filter((id) => byId.has(id) && !taken.has(id))
-      .map((id) => {
-        taken.add(id);
-        return byId.get(id);
-      })
-  );
-  const pool = presentPlayers.filter((p) => !taken.has(p.id));
-  return { manualTables, pool };
-}

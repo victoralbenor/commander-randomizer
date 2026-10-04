@@ -3,12 +3,14 @@ import { Plus, X, Lock, Pencil } from 'lucide-react';
 import { MIN_TABLE_SIZE, MAX_TABLE_SIZE } from '../lib/pairing.js';
 
 /**
- * Lets the user lock groups of players together. Locked players are removed
- * from the random pool by the parent; the rest get randomized around them.
+ * Lets the user record tables the group already started by hand (e.g. as
+ * people arrived). Saving them logs a played round, so the next randomize
+ * avoids repeating those pairings.
  *
  * `presentPlayers`: [{ id, name }]   `manualTables`: [[id, ...], ...]
+ * `onSave`: save the tables as a round   `saveBlockReason`: non-empty disables saving
  */
-export default function ManualTables({ presentPlayers, manualTables, onChange }) {
+export default function ManualTables({ presentPlayers, manualTables, onChange, onSave, saveBlockReason }) {
   const [editing, setEditing] = useState(null);
 
   const nameById = new Map(presentPlayers.map((p) => [p.id, p.name]));
@@ -42,7 +44,7 @@ export default function ManualTables({ presentPlayers, manualTables, onChange })
     <div className="bg-slate-900/50 p-3 rounded-2xl border border-slate-800 flex flex-col gap-3">
       <div className="flex items-center justify-between px-1">
         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-          Manual tables {manualTables.length > 0 && `(${manualTables.length})`}
+          Manual round {manualTables.length > 0 && `(${manualTables.length} table${manualTables.length > 1 ? 's' : ''})`}
         </span>
         <button
           onClick={addTable}
@@ -55,7 +57,7 @@ export default function ManualTables({ presentPlayers, manualTables, onChange })
 
       {manualTables.length === 0 && (
         <p className="text-slate-500 text-xs px-1">
-          Lock a group together. Everyone else gets randomized around them.
+          Already started games? Add those tables and save them as a round, so the next randomize avoids repeating these pairings.
         </p>
       )}
 
@@ -137,6 +139,21 @@ export default function ManualTables({ presentPlayers, manualTables, onChange })
           </div>
         );
       })}
+
+      {manualTables.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={onSave}
+            disabled={!!saveBlockReason}
+            className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-orange-200 text-sm font-bold py-3 rounded-xl border border-orange-500/40 transition-colors active:scale-[0.98]"
+          >
+            <Lock size={16} /> Save as played round
+          </button>
+          {saveBlockReason && (
+            <p className="text-amber-300/80 text-xs px-1">{saveBlockReason}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

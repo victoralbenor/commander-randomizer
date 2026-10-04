@@ -6,7 +6,6 @@ import {
   buildPairHistory,
   scoreTables,
   optimizeTables,
-  splitPool,
   pairKey,
 } from './pairing.js';
 
@@ -69,9 +68,23 @@ test('scoreTables penalizes a third repeat more than a first', () => {
   assert.ok(scoreTables(table, { counts: twice, last: new Set() }) > 2 * scoreTables(table, { counts: once, last: new Set() }) - 1);
 });
 
-test('splitPool removes manual players from the pool and drops absent ids', () => {
-  const p = mk(8);
-  const { manualTables, pool } = splitPool(p, [['p1', 'p2', 'p3'], ['p3', 'p4', 'ghost']]);
-  assert.deepEqual(manualTables.map((t) => t.map((x) => x.id)), [['p1', 'p2', 'p3'], ['p4']]);
-  assert.deepEqual(pool.map((x) => x.id), ['p5', 'p6', 'p7', 'p8']);
+test('a saved manual round counts as played: the next randomize avoids its pairings', () => {
+  // 9 players, tables started by hand as people arrived: [1 2 3] [4 5 6] [7 8 9].
+  const p = mk(9);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  const manualRound = {
+    tables: [at(1, 2, 3), at(4, 5, 6), at(7, 8, 9)].map((players) => ({ players, manual: true })),
+  };
+  const history = buildPairHistory([manualRound]);
+  for (let i = 0; i < 50; i++) {
+    const { tables, cost } = optimizeTables(p, [3, 3, 3], history);
+    assert.equal(cost, 0);
+    tables.forEach((t) =>
+      t.forEach((a, j) =>
+        t.slice(j + 1).forEach((b) => {
+          assert.ok(!history.counts.has(pairKey(a.id, b.id)), `${a.id} and ${b.id} repeated`);
+        })
+      )
+    );
+  }
 });
