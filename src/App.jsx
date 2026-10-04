@@ -1,13 +1,7 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X, Undo2, Lock } from 'lucide-react';
-import {
-  initializeApp
-} from 'firebase/app';
-import {
-  getAuth,
-  signInAnonymously,
-  onAuthStateChanged
-} from 'firebase/auth';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X, Lock } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import {
   getFirestore,
   collection,
@@ -15,7 +9,7 @@ import {
   doc,
   setDoc,
   deleteDoc,
-  getDocs
+  writeBatch
 } from 'firebase/firestore';
 import ManualTables from './components/ManualTables.jsx';
 import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables, getMovedIds } from './lib/pairing.js';
@@ -30,18 +24,15 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-let app, auth, db, appId;
+let auth, db;
 
 try {
-  app = initializeApp(firebaseConfig);
+  const app = initializeApp(firebaseConfig);
   auth = getAuth(app);
   db = getFirestore(app);
-  appId = import.meta.env.VITE_FIREBASE_APP_ID || 'commander-randomizer-app';
 } catch (e) {
   console.error("Firebase initialization failed", e);
 }
-
-const DEFAULT_ROSTER = ["Betão", "Eddie", "Emanas", "Zoio", "Timas", "Igão", "Bisão", "Limosito", "Miranda", "Lucin", "Matias", "Zamis", "André", "Paulo", "Vitam", "Pulga", "Marcelo"];
 
 const PLAYERS_COLLECTION_PATH = 'players';
 const ROLLS_COLLECTION_PATH = 'rolls';
@@ -60,7 +51,6 @@ export default function App() {
   const [dbError, setDbError] = useState('');
   const [rolls, setRolls] = useState([]);
   const [manualIds, setManualIds] = useState([]);
-  const hasInjectedDefault = useRef(false);
 
   const presentPlayers = useMemo(() => players.filter(p => p.isPresent), [players]);
   const presentCount = presentPlayers.length;
@@ -114,42 +104,17 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Roster: lives in Firestore, so anyone adding or removing players updates it for everyone.
   useEffect(() => {
     if (!user || !db) return;
-
-    // GLOBAL PERSISTENCE
-    const playersRef = collection(db, PLAYERS_COLLECTION_PATH);
-
-    // Check and inject default roster if empty
-    const checkDefault = async () => {
-      if (hasInjectedDefault.current) return;
-      try {
-        const snap = await getDocs(playersRef);
-        if (snap.empty) {
-          hasInjectedDefault.current = true;
-          DEFAULT_ROSTER.forEach(name => {
-            const newRef = doc(playersRef);
-            setDoc(newRef, { name, isPresent: true });
-          });
-        }
-      } catch (e) {
-        console.error('Firestore read failed:', e);
-        setDbError('Firestore access failed. Please verify Firestore rules and collection permissions.');
-      }
-    };
-    checkDefault();
-
-    const unsubscribe = onSnapshot(playersRef, (snapshot) => {
-      const fetchedPlayers = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+    const unsubscribe = onSnapshot(collection(db, PLAYERS_COLLECTION_PATH), (snapshot) => {
+      const fetchedPlayers = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       fetchedPlayers.sort((a, b) => a.name.localeCompare(b.name));
       setPlayers(fetchedPlayers);
     }, (error) => {
-      console.error("Error fetching players:", error);
+      console.error('Error fetching players:', error);
+      setDbError('Unable to read the roster. Verify Firestore rules for the players collection.');
     });
-
     return () => unsubscribe();
   }, [user]);
 
@@ -166,64 +131,44 @@ export default function App() {
   }, [user]);
 
   // --- Handlers ---
-  const addPlayer = async (e) => {
+  // Writes are not awaited: Firestore's local cache updates the UI immediately
+  // (and an await would hang while offline). Failures surface in the banner.
+  const fail = (message) => (err) => {
+    console.error(message, err);
+    setDbError(message);
+  };
+
+  const addPlayer = (e) => {
     e.preventDefault();
-    const nameToAdd = newPlayerName.trim();
-    if (!nameToAdd || !user) return;
+    const name = newPlayerName.trim();
+    if (!name || !user) return;
 
-    // Instant clear
     setNewPlayerName('');
-
-    const newId = crypto.randomUUID();
-    const playerRef = doc(db, PLAYERS_COLLECTION_PATH, newId);
-
-    try {
-      await setDoc(playerRef, {
-        name: nameToAdd,
-        isPresent: true
-      });
-    } catch (err) {
-      console.error("Error adding player:", err);
-      setDbError('Unable to add player. Verify Firestore write permissions.');
-    }
+    setDoc(doc(db, PLAYERS_COLLECTION_PATH, crypto.randomUUID()), { name, isPresent: true })
+      .catch(fail('Unable to add player. Verify Firestore write permissions.'));
   };
 
-  const removePlayer = async (id) => {
+  const removePlayer = (id) => {
     if (!user) return;
-    try {
-      const playerRef = doc(db, PLAYERS_COLLECTION_PATH, id);
-      await deleteDoc(playerRef);
-    } catch (err) {
-      console.error("Error removing player:", err);
-      setDbError('Unable to remove player. Verify Firestore delete permissions.');
-    }
+    deleteDoc(doc(db, PLAYERS_COLLECTION_PATH, id))
+      .catch(fail('Unable to remove player. Verify Firestore delete permissions.'));
   };
 
-  const togglePresence = async (id, currentStatus) => {
+  const togglePresence = (id, currentStatus) => {
     if (!user) return;
-    try {
-      const playerRef = doc(db, PLAYERS_COLLECTION_PATH, id);
-      await setDoc(playerRef, { isPresent: !currentStatus }, { merge: true });
-    } catch (err) {
-      console.error("Error toggling presence:", err);
-      setDbError('Unable to update presence. Verify Firestore update permissions.');
-    }
+    setDoc(doc(db, PLAYERS_COLLECTION_PATH, id), { isPresent: !currentStatus }, { merge: true })
+      .catch(fail('Unable to update presence. Verify Firestore update permissions.'));
   };
 
-  const setAllPresence = async (status) => {
+  const setAllPresence = (status) => {
     if (!user || players.length === 0) return;
-    try {
-      const promises = players.map(player => {
-        if (player.isPresent !== status) {
-          const playerRef = doc(db, PLAYERS_COLLECTION_PATH, player.id);
-          return setDoc(playerRef, { isPresent: status }, { merge: true });
-        }
-        return Promise.resolve();
-      });
-      await Promise.all(promises);
-    } catch (err) {
-      console.error("Error setting bulk presence:", err);
-    }
+    const batch = writeBatch(db);
+    players.forEach(player => {
+      if (player.isPresent !== status) {
+        batch.set(doc(db, PLAYERS_COLLECTION_PATH, player.id), { isPresent: status }, { merge: true });
+      }
+    });
+    batch.commit().catch(fail('Unable to update presence. Verify Firestore update permissions.'));
   };
 
   // --- Generation ---
@@ -239,12 +184,9 @@ export default function App() {
       tables,
     };
 
-    // Not awaited: Firestore's local cache updates the UI immediately, and an
-    // await would hang while offline.
-    setDoc(doc(db, ROLLS_COLLECTION_PATH, crypto.randomUUID()), roll).catch((err) => {
-      console.error('Error saving roll:', err);
-      setDbError('Unable to save the roll. Verify Firestore write permissions for the rolls collection.');
-    });
+    // Rolls are append-only: never edited or deleted, so the history stays consistent.
+    setDoc(doc(db, ROLLS_COLLECTION_PATH, crypto.randomUUID()), roll)
+      .catch(fail('Unable to save the roll. Verify Firestore write permissions for the rolls collection.'));
   };
 
   // Shuffles everyone present, avoiding pairings already in the shared history
@@ -262,15 +204,6 @@ export default function App() {
     if (manualBlockReason || manualTables.length === 0 || !user) return;
     saveRoll(manualTables.map(players => ({ manual: true, players })));
     setManualIds([]);
-  };
-
-  const undoLastRoll = () => {
-    const latest = historyRolls[0];
-    if (!latest || !user) return;
-    deleteDoc(doc(db, ROLLS_COLLECTION_PATH, latest.id)).catch((err) => {
-      console.error('Error undoing roll:', err);
-      setDbError('Unable to undo the last roll. Verify Firestore delete permissions for the rolls collection.');
-    });
   };
 
   return (
@@ -326,7 +259,7 @@ export default function App() {
               </h2>
               {players.length === 0 ? (
                 <div className="text-center p-8 bg-slate-900/50 rounded-2xl border border-slate-800/50 border-dashed">
-                  <p className="text-slate-500 text-sm">Your roster is empty. Loading default roster...</p>
+                  <p className="text-slate-500 text-sm">Your roster is empty. Add players above.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-2 gap-2">
@@ -469,16 +402,10 @@ export default function App() {
             {/* History Feed */}
             {historyRolls.length > 0 && (
               <div className="mt-2 flex flex-col gap-6">
-                <div className="flex items-center justify-between px-1">
+                <div className="px-1">
                   <span className="text-xs text-slate-500">
                     History: {historyRolls.length} roll{historyRolls.length > 1 ? 's' : ''}
                   </span>
-                  <button
-                    onClick={undoLastRoll}
-                    className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
-                  >
-                    <Undo2 size={14} className="text-orange-400" /> Undo last
-                  </button>
                 </div>
 
                 {historyRolls.map((historyItem, hIndex) => {

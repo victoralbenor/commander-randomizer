@@ -18,4 +18,9 @@ export default defineConfig([
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
   },
+  {
+    // Tooling configs (tailwind.config.js is CommonJS) run in Node, not the browser.
+    files: ['*.config.js'],
+    languageOptions: { globals: globals.node },
+  },
 ])

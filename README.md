@@ -1,16 +1,53 @@
-# React + Vite
+# Commander Randomizer
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Mobile-first web app that randomizes Magic: The Gathering Commander pods (tables) for a group that plays several rounds in a night. Everything is shared in real time through Firestore, so everyone sees the same roster, attendance and history.
 
-Currently, two official plugins are available:
+Live: https://victoralbenor.github.io/commander-randomizer/
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## How it works
 
-## React Compiler
+- **Roster** – shared list of players. Anyone can add or remove people and it updates for everyone.
+- **Present** – shared attendance toggles for who is playing.
+- **Tables** – randomizes everyone present into tables. Pairings come from the **whole shared history**, so people who have sat together the least are seated together first, and repeats are avoided across rounds, not just against the last one. Players whose table number changed since the previous roll are highlighted.
+- **Manual round** – for games started as people arrive: add the tables by hand and save them as a played round. They count as history, so the next randomize avoids repeating those pairings.
+- **History** – every roll is saved in Firestore and never edited or deleted, so the record stays consistent for fairness.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The pairing logic lives in `src/lib/pairing.js` (pure functions, unit-tested).
 
-## Expanding the ESLint configuration
+## Setup
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+npm install
+```
+
+Create `.env.local` with your Firebase web app config:
+
+```
+VITE_FIREBASE_API_KEY=
+VITE_FIREBASE_AUTH_DOMAIN=
+VITE_FIREBASE_PROJECT_ID=
+VITE_FIREBASE_STORAGE_BUCKET=
+VITE_FIREBASE_MESSAGING_SENDER_ID=
+VITE_FIREBASE_APP_ID=
+```
+
+Enable **Anonymous** sign-in in Firebase Authentication and publish the rules in [`firestore.rules`](firestore.rules).
+
+## Scripts
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Start the dev server |
+| `npm test` | Run the pairing unit tests (`node --test`) |
+| `npm run lint` | ESLint |
+| `npm run build` | Production build |
+| `npm run deploy` | Build and publish to GitHub Pages (`gh-pages` branch) |
+
+## Data model (Firestore)
+
+- `players/{id}` – `{ name, isPresent }`
+- `rolls/{id}` – `{ createdAt, tables: [{ manual, players: [{ id, name }] }] }`, append-only
+
+## Preview builds
+
+`.github/workflows/preview.yml` builds the `manual-tables-session-history` branch and publishes it under `/preview/manual-tables/` on GitHub Pages. It needs the six `VITE_FIREBASE_*` values as repository secrets.
