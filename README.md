@@ -48,6 +48,6 @@ Enable **Anonymous** sign-in in Firebase Authentication and publish the rules in
 - `players/{id}` – `{ name, isPresent }`
 - `rolls/{id}` – `{ createdAt, tables: [{ manual, players: [{ id, name }] }] }`, append-only
 
-## Preview builds
+## Deployment
 
-`.github/workflows/preview.yml` builds the `manual-tables-session-history` branch and publishes it under `/preview/manual-tables/` on GitHub Pages. It needs the six `VITE_FIREBASE_*` values as repository secrets.
+`.github/workflows/deploy.yml` tests, lints, builds and publishes `main` to GitHub Pages on every push (`npm run deploy` still works for manual publishing). It needs the six `VITE_FIREBASE_*` values as repository secrets.
