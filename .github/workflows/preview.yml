@@ -49,7 +49,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      # `npm ci` fails on Linux: package-lock.json lacks @emnapi/core and
+      # @emnapi/runtime (needed by Vite 8's wasm fallback binding). `npm install`
+      # resolves them in CI without modifying the committed lockfile.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
 
       - name: Unit tests
         run: npm test
