@@ -1,22 +1,26 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X } from 'lucide-react';
-import { 
-  initializeApp 
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X, Undo2, RotateCcw, Lock } from 'lucide-react';
+import {
+  initializeApp
 } from 'firebase/app';
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged 
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged
 } from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  onSnapshot, 
-  doc, 
-  setDoc, 
+import {
+  getFirestore,
+  collection,
+  onSnapshot,
+  doc,
+  setDoc,
   deleteDoc,
-  getDocs
+  getDocs,
+  query,
+  where
 } from 'firebase/firestore';
+import ManualTables from './components/ManualTables.jsx';
+import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables, splitPool } from './lib/pairing.js';
 
 // --- Firebase Initialization ---
 const firebaseConfig = {
@@ -41,46 +45,71 @@ try {
 
 const DEFAULT_ROSTER = ["Betão", "Eddie", "Emanas", "Zoio", "Timas", "Igão", "Bisão", "Limosito", "Miranda", "Lucin", "Matias", "Zamis", "André", "Paulo", "Vitam", "Pulga", "Marcelo"];
 
-// --- Table Configurations (1-20 players) ---
-const TABLE_CONFIGS = {
-  3: [[3]],
-  4: [[4]],
-  5: [[5]],
-  6: [[3, 3], [6]],
-  7: [[4, 3]],
-  8: [[4, 4]],
-  9: [[3, 3, 3], [5, 4]],
-  10: [[4, 3, 3], [5, 5]],
-  11: [[4, 4, 3]],
-  12: [[4, 4, 4], [3, 3, 3, 3], [6, 6]],
-  13: [[4, 3, 3, 3], [5, 4, 4]],
-  14: [[4, 4, 3, 3], [5, 5, 4]],
-  15: [[4, 4, 4, 3], [5, 5, 5], [3, 3, 3, 3, 3]],
-  16: [[4, 4, 4, 4]],
-  17: [[4, 4, 4, 5], [4, 4, 3, 3, 3]],
-  18: [[4, 4, 4, 3, 3], [5, 5, 4, 4], [3, 3, 3, 3, 3, 3]],
-  19: [[4, 4, 4, 4, 3], [5, 5, 5, 4]],
-  20: [[4, 4, 4, 4, 4], [5, 5, 5, 5]]
+const PLAYERS_COLLECTION_PATH = 'players';
+const ROLLS_COLLECTION_PATH = 'rolls';
+
+const formatTimestamp = (date) => {
+  const pad = (n) => n.toString().padStart(2, '0');
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+// Table index per player in the previous roll, but only when that roll had the
+// same players and layout (otherwise "moved" highlighting is meaningless).
+const getPrevTableMap = (roll, prevRoll) => {
+  if (!prevRoll || prevRoll.playerIds !== roll.playerIds || prevRoll.layout !== roll.layout) return null;
+  const map = {};
+  prevRoll.tables.forEach((table, index) => {
+    table.players.forEach(player => {
+      map[player.id] = index;
+    });
+  });
+  return map;
 };
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [players, setPlayers] = useState([]);
   const [newPlayerName, setNewPlayerName] = useState('');
-  const [activeTab, setActiveTab] = useState('attendance'); 
-  const [generatedTables, setGeneratedTables] = useState([]);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [selectedConfigIndex, setSelectedConfigIndex] = useState(0);
+  const [activeTab, setActiveTab] = useState('attendance');
+  const [selectedLayoutKey, setSelectedLayoutKey] = useState('');
   const [dbError, setDbError] = useState('');
+  const [rolls, setRolls] = useState([]);
+  const [sessionId, setSessionId] = useState(null);
+  const [manualIds, setManualIds] = useState([]);
   const hasInjectedDefault = useRef(false);
 
-  const PLAYERS_COLLECTION_PATH = 'players';
-  const presentCount = players.filter(p => p.isPresent).length;
+  const presentPlayers = useMemo(() => players.filter(p => p.isPresent), [players]);
+  const presentCount = presentPlayers.length;
 
-  // Auto-reset config index if player count changes
-  useEffect(() => {
-    setSelectedConfigIndex(0);
-  }, [presentCount]);
+  // Manual tables are locked; everyone else is the random pool.
+  const { manualTables, pool } = useMemo(
+    () => splitPool(presentPlayers, manualIds),
+    [presentPlayers, manualIds]
+  );
+  const poolCount = pool.length;
+  const hasManual = manualTables.length > 0;
+
+  // Rolls of the current session, newest first.
+  const sessionRolls = useMemo(
+    () => rolls
+      .filter(r => r.sessionId === sessionId)
+      .sort((a, b) => b.createdAt - a.createdAt),
+    [rolls, sessionId]
+  );
+
+  const currentConfigs = getLayouts(poolCount);
+  const activeLayout = currentConfigs.find(c => c.join(',') === selectedLayoutKey) || currentConfigs[0];
+
+  // Why the roll button is disabled (empty string = ready).
+  const blockReason = (() => {
+    if (presentCount < MIN_TABLE_SIZE) return `Need at least ${MIN_TABLE_SIZE} players. Currently have ${presentCount}.`;
+    const short = manualTables.findIndex(t => t.length < MIN_TABLE_SIZE);
+    if (short !== -1) return `Manual table ${short + 1} needs at least ${MIN_TABLE_SIZE} players.`;
+    if (poolCount > 0 && poolCount < MIN_TABLE_SIZE) {
+      return `${poolCount} player${poolCount > 1 ? 's' : ''} left over. Add them to a manual table or mark them absent.`;
+    }
+    return '';
+  })();
 
   // --- Auth & Data Fetching ---
   useEffect(() => {
@@ -104,7 +133,7 @@ export default function App() {
 
     // GLOBAL PERSISTENCE
     const playersRef = collection(db, PLAYERS_COLLECTION_PATH);
-    
+
     // Check and inject default roster if empty
     const checkDefault = async () => {
       if (hasInjectedDefault.current) return;
@@ -138,6 +167,32 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
+  // Current session marker, shared across devices (meta/session). "default" until someone starts a new one.
+  useEffect(() => {
+    if (!user || !db) return;
+    const unsubscribe = onSnapshot(doc(db, 'meta', 'session'), (snap) => {
+      setSessionId(snap.exists() ? snap.data().id : 'default');
+    }, (error) => {
+      console.error('Error reading session:', error);
+      setDbError('Unable to read the session. Verify Firestore rules for the meta collection.');
+      setSessionId('default');
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  // Roll history for the current session, shared across devices.
+  useEffect(() => {
+    if (!user || !db || !sessionId) return;
+    const rollsQuery = query(collection(db, ROLLS_COLLECTION_PATH), where('sessionId', '==', sessionId));
+    const unsubscribe = onSnapshot(rollsQuery, (snapshot) => {
+      setRolls(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    }, (error) => {
+      console.error('Error fetching rolls:', error);
+      setDbError('Unable to read roll history. Verify Firestore rules for the rolls collection.');
+    });
+    return () => unsubscribe();
+  }, [user, sessionId]);
+
   // --- Handlers ---
   const addPlayer = async (e) => {
     e.preventDefault();
@@ -149,11 +204,11 @@ export default function App() {
 
     const newId = crypto.randomUUID();
     const playerRef = doc(db, PLAYERS_COLLECTION_PATH, newId);
-    
+
     try {
       await setDoc(playerRef, {
         name: nameToAdd,
-        isPresent: true 
+        isPresent: true
       });
     } catch (err) {
       console.error("Error adding player:", err);
@@ -199,145 +254,65 @@ export default function App() {
     }
   };
 
-  // --- Generation Algorithm ---
-  const formatTimestamp = (date) => {
-    const pad = (n) => n.toString().padStart(2, '0');
-    return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-  };
-
-  const getPreviousPairs = (lastGen) => {
-    if (!lastGen) return new Set();
-    const pairs = new Set();
-    lastGen.tables.forEach(table => {
-      for (let i = 0; i < table.length; i++) {
-        for (let j = i + 1; j < table.length; j++) {
-          const key = [table[i].id, table[j].id].sort().join('-');
-          pairs.add(key);
-        }
-      }
-    });
-    return pairs;
-  };
-
-  const getPreviousTableMap = (lastGen) => {
-    if (!lastGen) return {};
-    const map = {};
-    lastGen.tables.forEach((table, index) => {
-      table.forEach(player => {
-        map[player.id] = index;
-      });
-    });
-    return map;
-  };
-
-  const getFallbackConfig = (count) => {
-    const numTables = Math.ceil(count / 4);
-    const baseSize = Math.floor(count / numTables);
-    let remainder = count % numTables;
-    const layout = [];
-    for (let i = 0; i < numTables; i++) {
-      layout.push(baseSize + (remainder > 0 ? 1 : 0));
-      if (remainder > 0) remainder--;
-    }
-    return [layout];
-  };
-
-  const getCurrentConfigs = () => {
-    if (presentCount < 3) return [];
-    return TABLE_CONFIGS[presentCount] || getFallbackConfig(presentCount);
-  };
-
-  const currentConfigs = getCurrentConfigs();
-  const activeLayout = currentConfigs[selectedConfigIndex] || currentConfigs[0];
-
-  const chunkPlayersWithLayout = (shuffled, layout) => {
-    const tables = [];
-    let startIndex = 0;
-    for (const size of layout) {
-      tables.push(shuffled.slice(startIndex, startIndex + size));
-      startIndex += size;
-    }
-    return tables;
-  };
-
+  // --- Generation ---
+  // Manual tables are kept as-is, the remaining pool is optimized against the
+  // whole session's pair history, and everything is saved as one shared roll.
   const generateTables = () => {
-    const presentPlayers = players.filter(p => p.isPresent);
-    const count = presentPlayers.length;
-    setErrorMsg('');
+    if (blockReason || !sessionId || !user) return;
 
-    if (count < 3) {
-      setErrorMsg(`Need at least 3 players. Currently have ${count}.`);
-      return;
+    let randomTables = [];
+    if (poolCount > 0) {
+      if (!activeLayout) return;
+      const history = buildPairHistory(sessionRolls);
+      randomTables = optimizeTables(pool, activeLayout, history).tables;
     }
 
-    if (!activeLayout) return;
+    const tables = [
+      ...manualTables.map(players => ({ manual: true, players })),
+      ...randomTables.map(players => ({ manual: false, players })),
+    ].map(t => ({
+      manual: t.manual,
+      players: t.players.map(({ id, name }) => ({ id, name })),
+    }));
 
-    // Capture the current context to compare with the previous roll
-    const currentPlayerIds = presentPlayers.map(p => p.id).sort().join(',');
-    const currentLayoutStr = activeLayout.join(',');
-
-    const prevGeneration = generatedTables[0];
-    const prevPairs = getPreviousPairs(prevGeneration);
-    const prevTableMap = getPreviousTableMap(prevGeneration);
-
-    // Check if the exact same players and table layout are being used
-    let isSameContext = false;
-    if (prevGeneration && prevGeneration.playerIds === currentPlayerIds && prevGeneration.layout === currentLayoutStr) {
-      isSameContext = true;
-    }
-
-    let bestScore = -1;
-    let bestTables = [];
-
-    // Generate 100 random shuffles and pick the one with the lowest overlap score
-    for (let i = 0; i < 100; i++) {
-      const shuffled = [...presentPlayers].sort(() => Math.random() - 0.5);
-      const candidateTables = chunkPlayersWithLayout(shuffled, activeLayout);
-      
-      let overlapScore = 0;
-      candidateTables.forEach(table => {
-        for (let j = 0; j < table.length; j++) {
-          for (let k = j + 1; k < table.length; k++) {
-            const key = [table[j].id, table[k].id].sort().join('-');
-            if (prevPairs.has(key)) overlapScore++;
-          }
-        }
-      });
-
-      if (bestScore === -1 || overlapScore < bestScore) {
-        bestScore = overlapScore;
-        bestTables = candidateTables;
-      }
-      if (bestScore === 0) break; // Perfect shuffle found
-    }
-
-    // Flag players who moved tables compared to the immediate last generation
-    // ONLY if the context (player list and layout) remained the exact same.
-    bestTables.forEach((table, tIndex) => {
-      table.forEach(player => {
-        if (isSameContext) {
-          const oldTIndex = prevTableMap[player.id];
-          player.moved = oldTIndex !== undefined && oldTIndex !== tIndex;
-        } else {
-          player.moved = false; // Disable highlighting if context changed
-        }
-      });
-    });
-
-    const newHistoryItem = {
-      id: crypto.randomUUID(),
-      timestamp: formatTimestamp(new Date()),
-      tables: bestTables,
-      playerIds: currentPlayerIds,
-      layout: currentLayoutStr
+    const roll = {
+      sessionId,
+      createdAt: Date.now(),
+      tables,
+      playerIds: presentPlayers.map(p => p.id).sort().join(','),
+      layout: tables.map(t => (t.manual ? `m${t.players.length}` : t.players.length)).join(','),
     };
 
-    setGeneratedTables([newHistoryItem, ...generatedTables]);
+    // Not awaited: Firestore's local cache updates the UI immediately, and an
+    // await would hang while offline.
+    setDoc(doc(db, ROLLS_COLLECTION_PATH, crypto.randomUUID()), roll).catch((err) => {
+      console.error('Error saving roll:', err);
+      setDbError('Unable to save the roll. Verify Firestore write permissions for the rolls collection.');
+    });
+    setManualIds([]);
+  };
+
+  const undoLastRoll = () => {
+    const latest = sessionRolls[0];
+    if (!latest || !user) return;
+    deleteDoc(doc(db, ROLLS_COLLECTION_PATH, latest.id)).catch((err) => {
+      console.error('Error undoing roll:', err);
+      setDbError('Unable to undo the last roll. Verify Firestore delete permissions for the rolls collection.');
+    });
+  };
+
+  const startNewSession = () => {
+    if (!user) return;
+    if (!window.confirm('Start a new session? Previous rolls stop counting toward pairings.')) return;
+    setDoc(doc(db, 'meta', 'session'), { id: crypto.randomUUID() }).catch((err) => {
+      console.error('Error starting session:', err);
+      setDbError('Unable to start a new session. Verify Firestore write permissions for the meta collection.');
+    });
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-200 font-sans w-full relative overflow-hidden shadow-2xl shadow-black">
-      
+
       {/* Header */}
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 shrink-0 flex items-center justify-between z-10">
         <div>
@@ -348,21 +323,32 @@ export default function App() {
         </div>
       </div>
 
+      {/* Firestore errors (rules, permissions) */}
+      {dbError && (
+        <div className="mx-4 mt-3 flex items-start gap-2 p-3 bg-amber-900/30 border border-amber-800/50 text-amber-200 rounded-xl text-sm">
+          <ShieldAlert size={18} className="shrink-0 mt-0.5" />
+          <p className="flex-1">{dbError}</p>
+          <button onClick={() => setDbError('')} aria-label="Dismiss" className="p-0.5 text-amber-300/70 hover:text-amber-200">
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
       {/* Main Scrollable Content */}
       <div className="flex-1 overflow-y-auto pb-24">
-        
+
         {/* TAB 1: ROSTER */}
         {activeTab === 'roster' && (
           <div className="p-4 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
             <form onSubmit={addPlayer} className="flex gap-2 relative">
-              <input 
-                type="text" 
+              <input
+                type="text"
                 value={newPlayerName}
                 onChange={(e) => setNewPlayerName(e.target.value)}
                 placeholder="Add new player..."
                 className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all"
               />
-              <button 
+              <button
                 type="submit"
                 disabled={!newPlayerName.trim()}
                 className="bg-orange-600 hover:bg-orange-500 disabled:opacity-50 disabled:hover:bg-orange-600 text-white p-3 rounded-xl transition-colors shadow-lg shadow-orange-900/20"
@@ -384,7 +370,7 @@ export default function App() {
                   {players.map(player => (
                     <div key={player.id} className="flex items-center justify-between bg-slate-800/80 pl-3 pr-1 py-1.5 rounded-xl border border-slate-700/50">
                       <span className="font-medium text-sm truncate pr-2">{player.name}</span>
-                      <button 
+                      <button
                         onClick={() => removePlayer(player.id)}
                         className="p-1.5 text-slate-500 hover:text-red-400 transition-colors shrink-0"
                       >
@@ -412,13 +398,13 @@ export default function App() {
 
             {players.length > 0 && (
               <div className="flex gap-2 mb-1">
-                <button 
+                <button
                   onClick={() => setAllPresence(true)}
                   className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 border border-slate-700/50 transition-colors active:scale-95"
                 >
                   <Check size={16} className="text-orange-400" /> Select All
                 </button>
-                <button 
+                <button
                   onClick={() => setAllPresence(false)}
                   className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 border border-slate-700/50 transition-colors active:scale-95"
                 >
@@ -438,8 +424,8 @@ export default function App() {
                     key={player.id}
                     onClick={() => togglePresence(player.id, player.isPresent)}
                     className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all active:scale-[0.98] min-h-[64px] ${
-                      player.isPresent 
-                        ? 'bg-orange-600/20 border-orange-500/50 text-orange-100' 
+                      player.isPresent
+                        ? 'bg-orange-600/20 border-orange-500/50 text-orange-100'
                         : 'bg-slate-800/60 border-slate-700/50 text-slate-500 opacity-80'
                     }`}
                   >
@@ -456,48 +442,58 @@ export default function App() {
         {/* TAB 3: TABLES */}
         {activeTab === 'tables' && (
           <div className="p-4 flex flex-col gap-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            
+
+            {/* Manual (locked) tables */}
+            <ManualTables
+              presentPlayers={presentPlayers}
+              manualTables={manualTables.map(t => t.map(p => p.id))}
+              onChange={setManualIds}
+            />
+
             {/* Configuration Options Picker */}
             {currentConfigs.length > 1 && (
               <div className="bg-slate-900/50 p-3 rounded-2xl border border-slate-800 flex flex-col gap-2">
                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-1">
-                  Table Layout ({presentCount} Players)
+                  {hasManual ? `Layout for the remaining ${poolCount} players` : `Table Layout (${presentCount} Players)`}
                 </span>
                 <div className="flex flex-wrap gap-2">
-                  {currentConfigs.map((config, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedConfigIndex(idx)}
-                      className={`flex-1 py-2 px-3 rounded-xl text-sm font-bold border transition-colors ${
-                        selectedConfigIndex === idx 
-                          ? 'bg-orange-600/20 border-orange-500 text-orange-300' 
-                          : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
-                      }`}
-                    >
-                      {config.join(' / ')}
-                    </button>
-                  ))}
+                  {currentConfigs.map((config) => {
+                    const key = config.join(',');
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setSelectedLayoutKey(key)}
+                        className={`flex-1 py-2 px-3 rounded-xl text-sm font-bold border transition-colors ${
+                          activeLayout && activeLayout.join(',') === key
+                            ? 'bg-orange-600/20 border-orange-500 text-orange-300'
+                            : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
+                        }`}
+                      >
+                        {config.join(' / ')}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
 
             <button
               onClick={generateTables}
-              disabled={presentCount < 3}
+              disabled={!!blockReason || !sessionId}
               className="w-full bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 text-white font-bold py-4 px-6 rounded-2xl shadow-xl shadow-orange-900/20 transition-all active:scale-[0.98] flex items-center justify-center gap-3"
             >
-              <Dices size={24} />
-              <span className="text-lg">Randomize Tables</span>
+              {hasManual && poolCount === 0 ? <Lock size={24} /> : <Dices size={24} />}
+              <span className="text-lg">{hasManual && poolCount === 0 ? 'Save Manual Round' : 'Randomize Tables'}</span>
             </button>
 
-            {errorMsg && (
+            {blockReason && players.length > 0 && (
               <div className="flex items-center gap-2 p-3 bg-red-900/30 border border-red-800/50 text-red-300 rounded-xl text-sm">
                 <ShieldAlert size={18} className="shrink-0" />
-                <p>{errorMsg}</p>
+                <p>{blockReason}</p>
               </div>
             )}
 
-            {generatedTables.length === 0 && !errorMsg && (
+            {sessionRolls.length === 0 && !blockReason && (
               <div className="text-center p-8 mt-4">
                 <Dices size={48} className="mx-auto text-slate-800 mb-4" />
                 <p className="text-slate-500 text-sm">Hit the button above to assign players to tables.</p>
@@ -506,49 +502,77 @@ export default function App() {
             )}
 
             {/* History Feed */}
-            {generatedTables.length > 0 && (
+            {sessionRolls.length > 0 && (
               <div className="mt-2 flex flex-col gap-6">
-                {generatedTables.map((historyItem, hIndex) => {
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-xs text-slate-500">
+                    Session: {sessionRolls.length} roll{sessionRolls.length > 1 ? 's' : ''}
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={undoLastRoll}
+                      className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
+                    >
+                      <Undo2 size={14} className="text-orange-400" /> Undo last
+                    </button>
+                    <button
+                      onClick={startNewSession}
+                      className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
+                    >
+                      <RotateCcw size={14} className="text-slate-500" /> New session
+                    </button>
+                  </div>
+                </div>
+
+                {sessionRolls.map((historyItem, hIndex) => {
                   const isLatest = hIndex === 0;
+                  const prevTableMap = isLatest ? getPrevTableMap(historyItem, sessionRolls[hIndex + 1]) : null;
                   return (
                     <div key={historyItem.id} className={`relative flex flex-col gap-3 ${!isLatest ? 'opacity-60 grayscale-[0.5] hover:opacity-100 hover:grayscale-0 transition-all duration-300' : ''}`}>
-                      
+
                       <div className="flex items-center justify-between px-1 border-b border-slate-800 pb-2">
                         <h2 className={`text-sm font-bold uppercase tracking-wider ${isLatest ? 'text-orange-400' : 'text-slate-500'}`}>
                           {isLatest ? 'Current Roll' : `Previous Roll`}
                         </h2>
                         <span className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-900/80 px-2 py-1 rounded-md border border-slate-800">
                           <Clock size={12} />
-                          {historyItem.timestamp}
+                          {formatTimestamp(new Date(historyItem.createdAt))}
                         </span>
                       </div>
-                      
+
                       <div className="grid grid-cols-2 gap-3">
                         {historyItem.tables.map((table, index) => (
                           <div key={index} className="bg-slate-800/60 rounded-2xl border border-slate-700 overflow-hidden shadow-lg flex flex-col h-full">
                             <div className="bg-slate-800 px-3 py-2 border-b border-slate-700 flex justify-between items-center shrink-0">
-                              <h3 className={`font-bold text-sm ${isLatest ? 'text-orange-300' : 'text-slate-300'}`}>
+                              <h3 className={`flex items-center gap-1.5 font-bold text-sm ${isLatest ? 'text-orange-300' : 'text-slate-300'}`}>
                                 Table {index + 1}
+                                {table.manual && <Lock size={11} className="text-slate-500" aria-label="Manual table" />}
                               </h3>
                               <span className="text-[10px] bg-slate-900 px-1.5 py-0.5 rounded text-slate-400 font-medium">
-                                {table.length} P
+                                {table.players.length} P
                               </span>
                             </div>
                             <div className="p-3 flex-1">
                               <ul className="flex flex-col gap-2">
-                                {table.map((player) => (
-                                  <li key={player.id} className="flex items-center gap-2 text-slate-200">
-                                    <span className="w-5 h-5 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center text-[10px] text-slate-400 shrink-0">
-                                      {table.indexOf(player) + 1}
-                                    </span>
-                                    <span className={`font-medium text-sm truncate ${isLatest && player.moved ? 'text-orange-300' : ''}`}>
-                                      {player.name}
-                                    </span>
-                                    {isLatest && player.moved && (
-                                      <ArrowRightLeft size={12} className="text-orange-500 shrink-0 ml-auto" />
-                                    )}
-                                  </li>
-                                ))}
+                                {table.players.map((player, pIndex) => {
+                                  const moved = !!prevTableMap
+                                    && !table.manual
+                                    && prevTableMap[player.id] !== undefined
+                                    && prevTableMap[player.id] !== index;
+                                  return (
+                                    <li key={player.id} className="flex items-center gap-2 text-slate-200">
+                                      <span className="w-5 h-5 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center text-[10px] text-slate-400 shrink-0">
+                                        {pIndex + 1}
+                                      </span>
+                                      <span className={`font-medium text-sm truncate ${moved ? 'text-orange-300' : ''}`}>
+                                        {player.name}
+                                      </span>
+                                      {moved && (
+                                        <ArrowRightLeft size={12} className="text-orange-500 shrink-0 ml-auto" />
+                                      )}
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             </div>
                           </div>
@@ -566,24 +590,24 @@ export default function App() {
 
       {/* Bottom Navigation */}
       <div className="fixed bottom-0 left-0 right-0 w-full bg-slate-900 border-t border-slate-800 flex justify-between px-2 pb-safe pt-2 z-30">
-        <NavButton 
-          icon={<Users />} 
-          label="Roster" 
-          isActive={activeTab === 'roster'} 
-          onClick={() => setActiveTab('roster')} 
+        <NavButton
+          icon={<Users />}
+          label="Roster"
+          isActive={activeTab === 'roster'}
+          onClick={() => setActiveTab('roster')}
         />
-        <NavButton 
-          icon={<CheckSquare />} 
-          label="Present" 
-          isActive={activeTab === 'attendance'} 
-          onClick={() => setActiveTab('attendance')} 
+        <NavButton
+          icon={<CheckSquare />}
+          label="Present"
+          isActive={activeTab === 'attendance'}
+          onClick={() => setActiveTab('attendance')}
           badge={presentCount > 0 ? presentCount : null}
         />
-        <NavButton 
-          icon={<Dices />} 
-          label="Tables" 
-          isActive={activeTab === 'tables'} 
-          onClick={() => setActiveTab('tables')} 
+        <NavButton
+          icon={<Dices />}
+          label="Tables"
+          isActive={activeTab === 'tables'}
+          onClick={() => setActiveTab('tables')}
         />
       </div>
     </div>
@@ -593,7 +617,7 @@ export default function App() {
 // Sub-component for Bottom Nav Button
 function NavButton({ icon, label, isActive, onClick, badge }) {
   return (
-    <button 
+    <button
       onClick={onClick}
       className={`relative flex-1 flex flex-col items-center justify-center py-3 px-1 gap-1 transition-colors ${
         isActive ? 'text-orange-500' : 'text-slate-500 hover:text-slate-300'
@@ -603,7 +627,7 @@ function NavButton({ icon, label, isActive, onClick, badge }) {
         {React.cloneElement(icon, { size: 22 })}
       </div>
       <span className="text-[10px] font-medium tracking-wide">{label}</span>
-      
+
       {badge !== null && badge !== undefined && (
         <span className="absolute top-1 right-1/4 translate-x-1/2 -translate-y-1 bg-orange-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full border-2 border-slate-900">
           {badge}
