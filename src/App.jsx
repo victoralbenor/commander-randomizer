@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X, Undo2, RotateCcw, Lock } from 'lucide-react';
+import { Users, CheckSquare, Dices, UserPlus, Trash2, ShieldAlert, Clock, ArrowRightLeft, Check, X, Undo2, Lock } from 'lucide-react';
 import {
   initializeApp
 } from 'firebase/app';
@@ -15,12 +15,10 @@ import {
   doc,
   setDoc,
   deleteDoc,
-  getDocs,
-  query,
-  where
+  getDocs
 } from 'firebase/firestore';
 import ManualTables from './components/ManualTables.jsx';
-import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables } from './lib/pairing.js';
+import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables, getMovedIds } from './lib/pairing.js';
 
 // --- Firebase Initialization ---
 const firebaseConfig = {
@@ -53,19 +51,6 @@ const formatTimestamp = (date) => {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 };
 
-// Table index per player in the previous roll, but only when that roll had the
-// same players and layout (otherwise "moved" highlighting is meaningless).
-const getPrevTableMap = (roll, prevRoll) => {
-  if (!prevRoll || prevRoll.playerIds !== roll.playerIds || prevRoll.layout !== roll.layout) return null;
-  const map = {};
-  prevRoll.tables.forEach((table, index) => {
-    table.players.forEach(player => {
-      map[player.id] = index;
-    });
-  });
-  return map;
-};
-
 export default function App() {
   const [user, setUser] = useState(null);
   const [players, setPlayers] = useState([]);
@@ -74,7 +59,6 @@ export default function App() {
   const [selectedLayoutKey, setSelectedLayoutKey] = useState('');
   const [dbError, setDbError] = useState('');
   const [rolls, setRolls] = useState([]);
-  const [sessionId, setSessionId] = useState(null);
   const [manualIds, setManualIds] = useState([]);
   const hasInjectedDefault = useRef(false);
 
@@ -93,12 +77,10 @@ export default function App() {
       }));
   }, [presentPlayers, manualIds]);
 
-  // Rolls of the current session, newest first.
-  const sessionRolls = useMemo(
-    () => rolls
-      .filter(r => r.sessionId === sessionId)
-      .sort((a, b) => b.createdAt - a.createdAt),
-    [rolls, sessionId]
+  // Full shared history, newest first.
+  const historyRolls = useMemo(
+    () => [...rolls].sort((a, b) => b.createdAt - a.createdAt),
+    [rolls]
   );
 
   const currentConfigs = getLayouts(presentCount);
@@ -171,31 +153,17 @@ export default function App() {
     return () => unsubscribe();
   }, [user]);
 
-  // Current session marker, shared across devices (meta/session). "default" until someone starts a new one.
+  // Roll history, shared across devices and never cleared.
   useEffect(() => {
     if (!user || !db) return;
-    const unsubscribe = onSnapshot(doc(db, 'meta', 'session'), (snap) => {
-      setSessionId(snap.exists() ? snap.data().id : 'default');
-    }, (error) => {
-      console.error('Error reading session:', error);
-      setDbError('Unable to read the session. Verify Firestore rules for the meta collection.');
-      setSessionId('default');
-    });
-    return () => unsubscribe();
-  }, [user]);
-
-  // Roll history for the current session, shared across devices.
-  useEffect(() => {
-    if (!user || !db || !sessionId) return;
-    const rollsQuery = query(collection(db, ROLLS_COLLECTION_PATH), where('sessionId', '==', sessionId));
-    const unsubscribe = onSnapshot(rollsQuery, (snapshot) => {
+    const unsubscribe = onSnapshot(collection(db, ROLLS_COLLECTION_PATH), (snapshot) => {
       setRolls(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (error) => {
       console.error('Error fetching rolls:', error);
       setDbError('Unable to read roll history. Verify Firestore rules for the rolls collection.');
     });
     return () => unsubscribe();
-  }, [user, sessionId]);
+  }, [user]);
 
   // --- Handlers ---
   const addPlayer = async (e) => {
@@ -259,7 +227,7 @@ export default function App() {
   };
 
   // --- Generation ---
-  // Saves one roll (a list of { manual, players } tables) to the shared session history.
+  // Saves one roll (a list of { manual, players } tables) to the shared history.
   const saveRoll = (rawTables) => {
     const tables = rawTables.map(t => ({
       manual: t.manual,
@@ -267,11 +235,8 @@ export default function App() {
     }));
 
     const roll = {
-      sessionId,
       createdAt: Date.now(),
       tables,
-      playerIds: tables.flatMap(t => t.players.map(p => p.id)).sort().join(','),
-      layout: tables.map(t => (t.manual ? `m${t.players.length}` : t.players.length)).join(','),
     };
 
     // Not awaited: Firestore's local cache updates the UI immediately, and an
@@ -282,11 +247,11 @@ export default function App() {
     });
   };
 
-  // Shuffles everyone present, avoiding pairings already seen this session
+  // Shuffles everyone present, avoiding pairings already in the shared history
   // (including manual rounds).
   const generateTables = () => {
-    if (blockReason || !sessionId || !user || !activeLayout) return;
-    const history = buildPairHistory(sessionRolls);
+    if (blockReason || !user || !activeLayout) return;
+    const history = buildPairHistory(historyRolls);
     const { tables } = optimizeTables(presentPlayers, activeLayout, history);
     saveRoll(tables.map(players => ({ manual: false, players })));
   };
@@ -294,26 +259,17 @@ export default function App() {
   // Records tables the group started by hand as a played round, so the next
   // randomize treats those pairings as already played.
   const saveManualRound = () => {
-    if (manualBlockReason || manualTables.length === 0 || !sessionId || !user) return;
+    if (manualBlockReason || manualTables.length === 0 || !user) return;
     saveRoll(manualTables.map(players => ({ manual: true, players })));
     setManualIds([]);
   };
 
   const undoLastRoll = () => {
-    const latest = sessionRolls[0];
+    const latest = historyRolls[0];
     if (!latest || !user) return;
     deleteDoc(doc(db, ROLLS_COLLECTION_PATH, latest.id)).catch((err) => {
       console.error('Error undoing roll:', err);
       setDbError('Unable to undo the last roll. Verify Firestore delete permissions for the rolls collection.');
-    });
-  };
-
-  const startNewSession = () => {
-    if (!user) return;
-    if (!window.confirm('Start a new session? Previous rolls stop counting toward pairings.')) return;
-    setDoc(doc(db, 'meta', 'session'), { id: crypto.randomUUID() }).catch((err) => {
-      console.error('Error starting session:', err);
-      setDbError('Unable to start a new session. Verify Firestore write permissions for the meta collection.');
     });
   };
 
@@ -456,7 +412,7 @@ export default function App() {
               manualTables={manualTables.map(t => t.map(p => p.id))}
               onChange={setManualIds}
               onSave={saveManualRound}
-              saveBlockReason={manualBlockReason || (sessionId ? '' : 'Connecting…')}
+              saveBlockReason={manualBlockReason}
             />
 
             {/* Configuration Options Picker */}
@@ -488,7 +444,7 @@ export default function App() {
 
             <button
               onClick={generateTables}
-              disabled={!!blockReason || !sessionId}
+              disabled={!!blockReason}
               className="w-full bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 text-white font-bold py-4 px-6 rounded-2xl shadow-xl shadow-orange-900/20 transition-all active:scale-[0.98] flex items-center justify-center gap-3"
             >
               <Dices size={24} />
@@ -502,7 +458,7 @@ export default function App() {
               </div>
             )}
 
-            {sessionRolls.length === 0 && !blockReason && (
+            {historyRolls.length === 0 && !blockReason && (
               <div className="text-center p-8 mt-4">
                 <Dices size={48} className="mx-auto text-slate-800 mb-4" />
                 <p className="text-slate-500 text-sm">Hit the button above to assign players to tables.</p>
@@ -511,31 +467,23 @@ export default function App() {
             )}
 
             {/* History Feed */}
-            {sessionRolls.length > 0 && (
+            {historyRolls.length > 0 && (
               <div className="mt-2 flex flex-col gap-6">
                 <div className="flex items-center justify-between px-1">
                   <span className="text-xs text-slate-500">
-                    Session: {sessionRolls.length} roll{sessionRolls.length > 1 ? 's' : ''}
+                    History: {historyRolls.length} roll{historyRolls.length > 1 ? 's' : ''}
                   </span>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={undoLastRoll}
-                      className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
-                    >
-                      <Undo2 size={14} className="text-orange-400" /> Undo last
-                    </button>
-                    <button
-                      onClick={startNewSession}
-                      className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
-                    >
-                      <RotateCcw size={14} className="text-slate-500" /> New session
-                    </button>
-                  </div>
+                  <button
+                    onClick={undoLastRoll}
+                    className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-700/50 transition-colors active:scale-95"
+                  >
+                    <Undo2 size={14} className="text-orange-400" /> Undo last
+                  </button>
                 </div>
 
-                {sessionRolls.map((historyItem, hIndex) => {
+                {historyRolls.map((historyItem, hIndex) => {
                   const isLatest = hIndex === 0;
-                  const prevTableMap = isLatest ? getPrevTableMap(historyItem, sessionRolls[hIndex + 1]) : null;
+                  const movedIds = isLatest ? getMovedIds(historyItem, historyRolls[hIndex + 1]) : null;
                   return (
                     <div key={historyItem.id} className={`relative flex flex-col gap-3 ${!isLatest ? 'opacity-60 grayscale-[0.5] hover:opacity-100 hover:grayscale-0 transition-all duration-300' : ''}`}>
 
@@ -565,10 +513,7 @@ export default function App() {
                             <div className="p-3 flex-1">
                               <ul className="flex flex-col gap-2">
                                 {table.players.map((player, pIndex) => {
-                                  const moved = !!prevTableMap
-                                    && !table.manual
-                                    && prevTableMap[player.id] !== undefined
-                                    && prevTableMap[player.id] !== index;
+                                  const moved = !!movedIds && movedIds.has(player.id);
                                   return (
                                     <li key={player.id} className="flex items-center gap-2 text-slate-200">
                                       <span className="w-5 h-5 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center text-[10px] text-slate-400 shrink-0">

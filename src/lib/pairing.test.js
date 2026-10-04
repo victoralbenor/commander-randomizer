@@ -6,6 +6,7 @@ import {
   buildPairHistory,
   scoreTables,
   optimizeTables,
+  getMovedIds,
   pairKey,
 } from './pairing.js';
 
@@ -87,4 +88,34 @@ test('a saved manual round counts as played: the next randomize avoids its pairi
       )
     );
   }
+});
+
+test('getMovedIds flags players whose table number changed since the previous roll', () => {
+  const p = mk(8);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  const prev = roll(at(1, 2, 3, 4), at(5, 6, 7, 8));
+  const next = roll(at(1, 2, 5, 6), at(3, 4, 7, 8));
+  assert.deepEqual([...getMovedIds(next, prev)].sort(), ['p3', 'p4', 'p5', 'p6']);
+  assert.equal(getMovedIds(next, undefined).size, 0);
+});
+
+test('getMovedIds works right after a manual round and with attendance changes', () => {
+  const p = mk(9);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  // Manual round started as people arrived; player 9 arrived later and wasn't in it.
+  const manual = {
+    tables: [at(1, 2, 3, 4), at(5, 6, 7, 8)].map((players) => ({ players, manual: true })),
+  };
+  const next = roll(at(1, 2, 3, 9), at(4, 5, 6, 7, 8));
+  const moved = getMovedIds(next, manual);
+  assert.deepEqual([...moved].sort(), ['p4']);
+  assert.ok(!moved.has('p9'), 'players absent from the previous roll are not flagged');
+});
+
+test('getMovedIds never flags players in manual tables', () => {
+  const p = mk(6);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  const prev = roll(at(1, 2, 3), at(4, 5, 6));
+  const next = { tables: [{ players: at(4, 5, 6), manual: true }, { players: at(1, 2, 3), manual: true }] };
+  assert.equal(getMovedIds(next, prev).size, 0);
 });

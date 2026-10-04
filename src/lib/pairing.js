@@ -157,3 +157,23 @@ export function optimizeTables(players, layout, history, { restarts = 30, rng = 
   }
   return best;
 }
+
+/**
+ * Ids of players in `roll`'s randomized tables who sit at a different table
+ * number than in `prevRoll`. Players who weren't in `prevRoll` are not flagged.
+ * Table numbers are physical tables, so this also works across manual rounds
+ * and attendance changes.
+ */
+export function getMovedIds(roll, prevRoll) {
+  const moved = new Set();
+  if (!prevRoll) return moved;
+  const prevIndex = new Map();
+  prevRoll.tables.forEach((table, i) => table.players.forEach((p) => prevIndex.set(p.id, i)));
+  roll.tables.forEach((table, i) => {
+    if (table.manual) return;
+    table.players.forEach((p) => {
+      if (prevIndex.has(p.id) && prevIndex.get(p.id) !== i) moved.add(p.id);
+    });
+  });
+  return moved;
+}
