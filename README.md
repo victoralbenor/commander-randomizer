@@ -10,6 +10,7 @@ Live: https://victoralbenor.github.io/commander-randomizer/
 - **Present** – shared attendance toggles for who is playing.
 - **Tables** – randomizes everyone present into tables. Pairings come from the **whole shared history**, so people who have sat together the least are seated together first, and repeats are avoided across rounds, not just against the last one. Players whose table number changed since the previous roll are highlighted.
 - **Manual round** – for games started as people arrive: add the tables by hand and save them as a played round. They count as history, so the next randomize avoids repeating those pairings.
+- **Sit together** – group players (e.g. a newcomer and the friends they brought) so they share a table in the next randomize only. The group is cleared after the roll; the pairs it forces cost nothing, and the resulting table counts as normal history.
 - **History** – every roll is saved in Firestore and never edited or deleted, so the record stays consistent for fairness.
 
 The pairing logic lives in `src/lib/pairing.js` (pure functions, unit-tested).
@@ -51,3 +52,5 @@ Enable **Anonymous** sign-in in Firebase Authentication and publish the rules in
 ## Deployment
 
 `.github/workflows/deploy.yml` tests, lints, builds and publishes `main` to GitHub Pages on every push (`npm run deploy` still works for manual publishing). It needs the six `VITE_FIREBASE_*` values as repository secrets.
+
+Other branches are built by `.github/workflows/preview.yml` and published under `/preview/<branch>/` (e.g. `https://victoralbenor.github.io/commander-randomizer/preview/together-groups/`).

@@ -3,6 +3,7 @@ import useFirebaseUser from './hooks/useFirebaseUser.js';
 import useRoster from './hooks/useRoster.js';
 import useRolls from './hooks/useRolls.js';
 import useManualTables from './hooks/useManualTables.js';
+import useTogetherGroups from './hooks/useTogetherGroups.js';
 import ErrorBanner from './components/ErrorBanner.jsx';
 import BottomNav from './components/BottomNav.jsx';
 import RosterTab from './components/RosterTab.jsx';
@@ -22,6 +23,7 @@ export default function App() {
   const roster = useRoster(user, reportError);
   const { historyRolls, saveRoll } = useRolls(user, reportError);
   const manual = useManualTables(roster.presentPlayers);
+  const together = useTogetherGroups(roster.presentPlayers);
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-200 font-sans w-full relative overflow-hidden shadow-2xl shadow-black">
@@ -55,6 +57,7 @@ export default function App() {
             historyRolls={historyRolls}
             saveRoll={saveRoll}
             manual={manual}
+            together={together}
           />
         )}
       </div>

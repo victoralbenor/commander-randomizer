@@ -1,27 +1,38 @@
 import { useState } from 'react';
 import { Dices, ShieldAlert } from 'lucide-react';
 import ManualTables from './ManualTables.jsx';
+import TogetherGroups from './TogetherGroups.jsx';
 import RollCard from './RollCard.jsx';
-import { MIN_TABLE_SIZE, getLayouts, buildPairHistory, optimizeTables, getMovedIds } from '../lib/pairing.js';
+import { MIN_TABLE_SIZE, getLayouts, assignGroups, buildPairHistory, optimizeTables, getMovedIds } from '../lib/pairing.js';
 
-export default function TablesTab({ players, presentPlayers, historyRolls, saveRoll, manual }) {
+export default function TablesTab({ players, presentPlayers, historyRolls, saveRoll, manual, together }) {
   const [selectedLayoutKey, setSelectedLayoutKey] = useState('');
 
   const presentCount = presentPlayers.length;
   const layouts = getLayouts(presentCount);
   const activeLayout = layouts.find((c) => c.join(',') === selectedLayoutKey) || layouts[0];
 
+  // Groups that matter: 2+ present members.
+  const activeGroups = together.groups.filter((g) => g.length >= 2);
+  const groupsFit = !activeLayout || activeGroups.length === 0
+    || assignGroups(activeGroups.map((g) => g.length), activeLayout) !== null;
+
   // Why Randomize is disabled (empty string = ready).
   const blockReason = presentCount < MIN_TABLE_SIZE
     ? `Need at least ${MIN_TABLE_SIZE} players. Currently have ${presentCount}.`
-    : '';
+    : !groupsFit
+      ? `The groups don't fit a ${activeLayout.join(' / ')} layout. Pick another layout or shrink a group.`
+      : '';
 
   // Shuffles everyone present, avoiding pairings already in the shared history
-  // (manual rounds included).
+  // (manual rounds included). Groups share a table; they apply to this roll only.
   const generateTables = () => {
     if (blockReason || !activeLayout) return;
-    const { tables } = optimizeTables(presentPlayers, activeLayout, buildPairHistory(historyRolls));
+    const { tables } = optimizeTables(presentPlayers, activeLayout, buildPairHistory(historyRolls), {
+      groups: activeGroups.map((g) => g.map((p) => p.id)),
+    });
     saveRoll(tables.map((p) => ({ manual: false, players: p })));
+    together.clear();
   };
 
   // Records hand-started tables as a played round so the next randomize avoids them.
@@ -39,6 +50,12 @@ export default function TablesTab({ players, presentPlayers, historyRolls, saveR
         onChange={manual.setManualIds}
         onSave={saveManualRound}
         saveBlockReason={manual.blockReason}
+      />
+
+      <TogetherGroups
+        presentPlayers={presentPlayers}
+        groups={together.groups.map((g) => g.map((p) => p.id))}
+        onChange={together.setGroupIds}
       />
 
       {layouts.length > 1 && (

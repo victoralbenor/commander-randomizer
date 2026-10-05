@@ -6,6 +6,7 @@ import {
   buildPairHistory,
   scoreTables,
   optimizeTables,
+  assignGroups,
   getMovedIds,
   pairKey,
 } from './pairing.js';
@@ -118,4 +119,57 @@ test('getMovedIds never flags players in manual tables', () => {
   const prev = roll(at(1, 2, 3), at(4, 5, 6));
   const next = { tables: [{ players: at(4, 5, 6), manual: true }, { players: at(1, 2, 3), manual: true }] };
   assert.equal(getMovedIds(next, prev).size, 0);
+});
+
+test('groups always share a table and the layout is respected', () => {
+  const p = mk(11);
+  const groupA = ['p1', 'p2', 'p3'];
+  const groupB = ['p4', 'p5'];
+  for (let i = 0; i < 100; i++) {
+    const { tables } = optimizeTables(p, [4, 4, 3], buildPairHistory([]), { groups: [groupA, groupB] });
+    assert.deepEqual(tables.map((t) => t.length), [4, 4, 3]);
+    assert.equal(new Set(tables.flat().map((x) => x.id)).size, 11);
+    const tableOf = (id) => tables.findIndex((t) => t.some((x) => x.id === id));
+    assert.equal(new Set(groupA.map(tableOf)).size, 1);
+    assert.equal(new Set(groupB.map(tableOf)).size, 1);
+  }
+});
+
+test('pairs forced by a group do not count towards the cost', () => {
+  const p = mk(6);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  const history = buildPairHistory([roll(at(1, 2, 3), at(4, 5, 6))]);
+  // One table of 6: p1-p2 is forced (free); the other 5 played pairs cost 1 + 0.5 each.
+  const { cost } = optimizeTables(p, [6], history, { groups: [['p1', 'p2']] });
+  assert.equal(cost, 7.5);
+  assert.equal(optimizeTables(p, [6], history).cost, 9);
+});
+
+test('groups work with history: free players still avoid repeats', () => {
+  const p = mk(9);
+  const at = (...n) => n.map((i) => p[i - 1]);
+  const history = buildPairHistory([roll(at(1, 4, 7), at(2, 5, 8), at(3, 6, 9))]);
+  for (let i = 0; i < 50; i++) {
+    const { tables, cost } = optimizeTables(p, [3, 3, 3], history, { groups: [['p1', 'p2']] });
+    assert.equal(cost, 0);
+    assert.ok(tables.some((t) => t.some((x) => x.id === 'p1') && t.some((x) => x.id === 'p2')));
+  }
+});
+
+test('assignGroups: fits, or null when impossible', () => {
+  assert.ok(assignGroups([3, 3], [4, 4, 3]));
+  assert.equal(assignGroups([5], [4, 4]), null);
+  assert.equal(assignGroups([3, 3, 3], [4, 4]), null);
+  const placed = assignGroups([4, 3], [4, 3]);
+  assert.deepEqual([...placed].sort(), [0, 1]);
+});
+
+test('groups of one, unknown ids and duplicates are ignored', () => {
+  const p = mk(6);
+  const { tables } = optimizeTables(p, [3, 3], buildPairHistory([]), {
+    groups: [['p1'], ['ghost', 'p2'], ['p3', 'p4'], ['p4', 'p5']],
+  });
+  const tableOf = (id) => tables.findIndex((t) => t.some((x) => x.id === id));
+  assert.equal(tableOf('p3'), tableOf('p4'));
+  assert.equal(new Set(tables.flat().map((x) => x.id)).size, 6);
 });

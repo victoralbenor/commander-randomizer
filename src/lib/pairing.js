@@ -103,17 +103,7 @@ export function scoreTables(tables, history) {
   return cost;
 }
 
-function chunk(players, layout) {
-  const tables = [];
-  let start = 0;
-  for (const size of layout) {
-    tables.push(players.slice(start, start + size));
-    start += size;
-  }
-  return tables;
-}
-
-function localSearch(tables, history) {
+function localSearch(tables, history, fixed) {
   let cost = scoreTables(tables, history);
   let improved = true;
   while (improved && cost > 0) {
@@ -124,6 +114,7 @@ function localSearch(tables, history) {
           for (let j = 0; j < tables[t2].length && !improved; j++) {
             const a = tables[t1][i];
             const b = tables[t2][j];
+            if (fixed.has(a.id) || fixed.has(b.id)) continue;
             tables[t1][i] = b;
             tables[t2][j] = a;
             const next = scoreTables(tables, history);
@@ -143,15 +134,88 @@ function localSearch(tables, history) {
 }
 
 /**
- * Seats `players` into `layout` (e.g. [4, 4, 3]) minimizing repeat pairings.
- * Random restarts + swap hill-climbing; ties resolve randomly through the
- * random starting points. Returns `{ tables, cost }`.
+ * Assigns each group (by size) to a table of `layout` without exceeding table
+ * capacities. Randomized exact search; returns one table index per group, or
+ * null when the groups can't fit (e.g. a group larger than every table).
  */
-export function optimizeTables(players, layout, history, { restarts = 30, rng = Math.random } = {}) {
+export function assignGroups(sizes, layout, rng = Math.random) {
+  const order = sizes.map((_, i) => i).sort((a, b) => sizes[b] - sizes[a]);
+  const capacity = [...layout];
+  const result = new Array(sizes.length);
+  const place = (k) => {
+    if (k === order.length) return true;
+    const u = order[k];
+    for (const t of shuffle(layout.map((_, i) => i), rng)) {
+      if (capacity[t] < sizes[u]) continue;
+      capacity[t] -= sizes[u];
+      result[u] = t;
+      if (place(k + 1)) return true;
+      capacity[t] += sizes[u];
+    }
+    return false;
+  };
+  return place(0) ? result : null;
+}
+
+/** Keeps only usable groups: present players, one group per player, 2+ members. */
+function resolveGroups(players, groups) {
+  const byId = new Map(players.map((p) => [p.id, p]));
+  const used = new Set();
+  const units = [];
+  groups.forEach((ids) => {
+    const unit = [];
+    ids.forEach((id) => {
+      if (byId.has(id) && !used.has(id)) {
+        used.add(id);
+        unit.push(byId.get(id));
+      }
+    });
+    if (unit.length >= 2) units.push(unit);
+  });
+  return units;
+}
+
+/** History without the pairs forced by groups (they're not a choice, so they cost nothing). */
+function withoutPairs(history, units) {
+  const counts = new Map(history.counts);
+  const last = new Set(history.last);
+  units.forEach((unit) =>
+    forEachPair(unit, (a, b) => {
+      const key = pairKey(a.id, b.id);
+      counts.delete(key);
+      last.delete(key);
+    })
+  );
+  return { counts, last };
+}
+
+/**
+ * Seats `players` into `layout` (e.g. [4, 4, 3]) minimizing repeat pairings.
+ * `groups` ([[id, ...], ...]) always share a table. Random restarts (which
+ * also randomize where groups go) + swap hill-climbing over the free players;
+ * ties resolve randomly. Returns `{ tables, cost }`.
+ * Throws if the groups can't fit the layout (check with `assignGroups` first).
+ */
+export function optimizeTables(players, layout, history, { restarts = 30, rng = Math.random, groups = [] } = {}) {
+  const units = resolveGroups(players, groups);
+  const inGroup = new Set(units.flat().map((p) => p.id));
+  const free = players.filter((p) => !inGroup.has(p.id));
+  const sizes = units.map((u) => u.length);
+  const effective = units.length ? withoutPairs(history, units) : history;
+
   let best = null;
   for (let r = 0; r < restarts; r++) {
-    const tables = chunk(shuffle(players, rng), layout);
-    const cost = localSearch(tables, history);
+    const tables = layout.map(() => []);
+    if (units.length) {
+      const assignment = assignGroups(sizes, layout, rng);
+      if (!assignment) throw new Error('Groups do not fit the layout');
+      units.forEach((unit, i) => tables[assignment[i]].push(...unit));
+    }
+    const queue = shuffle(free, rng);
+    tables.forEach((table, t) => {
+      while (table.length < layout[t]) table.push(queue.pop());
+    });
+    const cost = localSearch(tables, effective, inGroup);
     if (!best || cost < best.cost) best = { tables, cost };
     if (best.cost === 0) break;
   }
