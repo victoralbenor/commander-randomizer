@@ -4,6 +4,7 @@ import useRoster from './hooks/useRoster.js';
 import useRolls from './hooks/useRolls.js';
 import useManualTables from './hooks/useManualTables.js';
 import useTogetherGroups from './hooks/useTogetherGroups.js';
+import LoadingScreen from './components/LoadingScreen.jsx';
 import ErrorBanner from './components/ErrorBanner.jsx';
 import BottomNav from './components/BottomNav.jsx';
 import RosterTab from './components/RosterTab.jsx';
@@ -39,10 +40,11 @@ export default function App() {
       <ErrorBanner message={dbError} onDismiss={() => setDbError('')} />
 
       <div className="flex-1 overflow-y-auto pb-24">
-        {activeTab === 'roster' && (
+        {roster.loading && <LoadingScreen />}
+        {!roster.loading && activeTab === 'roster' && (
           <RosterTab players={roster.players} onAdd={roster.addPlayer} onRemove={roster.removePlayer} />
         )}
-        {activeTab === 'attendance' && (
+        {!roster.loading && activeTab === 'attendance' && (
           <PresentTab
             players={roster.players}
             presentCount={roster.presentPlayers.length}
@@ -50,7 +52,7 @@ export default function App() {
             onSetAll={roster.setAllPresence}
           />
         )}
-        {activeTab === 'tables' && (
+        {!roster.loading && activeTab === 'tables' && (
           <TablesTab
             players={roster.players}
             presentPlayers={roster.presentPlayers}

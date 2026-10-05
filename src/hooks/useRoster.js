@@ -7,6 +7,7 @@ import { db, PLAYERS_COLLECTION } from '../firebase.js';
 // (and an await would hang while offline). Failures go to `onError`.
 export default function useRoster(user, onError) {
   const [players, setPlayers] = useState([]);
+  const [settled, setSettled] = useState(false); // first snapshot (or error) received
 
   useEffect(() => {
     if (!user || !db) return;
@@ -16,10 +17,17 @@ export default function useRoster(user, onError) {
         const list = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
         list.sort((a, b) => a.name.localeCompare(b.name));
         setPlayers(list);
+        setSettled(true);
       },
-      (err) => onError('Unable to read the roster. Verify Firestore rules for the players collection.', err)
+      (err) => {
+        setSettled(true);
+        onError('Unable to read the roster. Verify Firestore rules for the players collection.', err);
+      }
     );
   }, [user, onError]);
+
+  // True until the roster first arrives; never true when Firebase isn't configured.
+  const loading = !!db && !settled;
 
   const presentPlayers = useMemo(() => players.filter((p) => p.isPresent), [players]);
 
@@ -50,5 +58,5 @@ export default function useRoster(user, onError) {
     batch.commit().catch((err) => onError('Unable to update presence. Verify Firestore update permissions.', err));
   };
 
-  return { players, presentPlayers, addPlayer, removePlayer, togglePresence, setAllPresence };
+  return { players, loading, presentPlayers, addPlayer, removePlayer, togglePresence, setAllPresence };
 }
